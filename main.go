@@ -93,7 +93,10 @@ func main() {
 				http.Error(w, "not found", 404)
 				return
 			}
-			autoConnect := `<script>localStorage.setItem("opendeck-webconfig-address",location.host)</script>`
+			autoConnect := `<script>
+localStorage.setItem("opendeck-webconfig-address",location.host);
+if(!location.hash.includes("/device/")){location.hash="#/device/__webconfig__"+encodeURIComponent(location.host)}
+</script>`
 			w.Header().Set("Content-Type", "text/html")
 			fmt.Fprint(w, autoConnect)
 			w.Write(indexData)
