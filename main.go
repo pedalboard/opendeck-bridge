@@ -63,7 +63,6 @@ func main() {
 			return
 		}
 		raw := msg.Bytes()
-		log.Printf("MIDI→WS: %x", raw)
 		// Ensure SysEx framing is present
 		if len(raw) > 0 && raw[0] != 0xF0 {
 			framed := make([]byte, len(raw)+2)
@@ -126,10 +125,8 @@ func main() {
 		for {
 			_, data, err := conn.ReadMessage()
 			if err != nil {
-				log.Printf("WebSocket closed: %v", err)
 				break
 			}
-			log.Printf("WS→MIDI: %x", data)
 			if len(data) >= 2 && data[0] == 0xF0 && data[len(data)-1] == 0xF7 {
 				inner := data[1 : len(data)-1]
 				send(midi.SysEx(inner))
