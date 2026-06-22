@@ -78,6 +78,7 @@ func main() {
 			return
 		}
 		defer conn.Close()
+		log.Printf("WebSocket client connected")
 
 		var mu sync.Mutex
 
@@ -86,6 +87,7 @@ func main() {
 			mu.Lock()
 			defer mu.Unlock()
 			raw := msg.Bytes()
+			log.Printf("MIDI→WS: %x", raw)
 			// gomidi may or may not include F0/F7 framing - ensure it's present
 			if len(raw) > 0 && raw[0] != 0xF0 {
 				framed := make([]byte, len(raw)+2)
@@ -107,8 +109,10 @@ func main() {
 		for {
 			_, data, err := conn.ReadMessage()
 			if err != nil {
+				log.Printf("WebSocket read error: %v", err)
 				break
 			}
+			log.Printf("WS→MIDI: %x", data)
 			// UI sends full SysEx with F0...F7 framing
 			// gomidi SysEx() expects inner bytes only (adds framing itself)
 			if len(data) >= 2 && data[0] == 0xF0 && data[len(data)-1] == 0xF7 {
