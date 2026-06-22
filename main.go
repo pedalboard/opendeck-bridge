@@ -50,9 +50,25 @@ func main() {
 		log.Fatalf("Cannot open MIDI out: %v", err)
 	}
 
-	// Serve embedded UI
+	// Serve embedded UI with auto-connect injection
 	uiFS, _ := fs.Sub(uiFiles, "ui")
-	http.Handle("/", http.FileServer(http.FS(uiFS)))
+	fileServer := http.FileServer(http.FS(uiFS))
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
+			indexData, err := uiFiles.ReadFile("ui/index.html")
+			if err != nil {
+				http.Error(w, "not found", 404)
+				return
+			}
+			// Inject script to auto-set WebConfig address to current host
+			autoConnect := `<script>localStorage.setItem("opendeck-webconfig-address",location.host)</script>`
+			w.Header().Set("Content-Type", "text/html")
+			w.Write([]byte(autoConnect))
+			w.Write(indexData)
+			return
+		}
+		fileServer.ServeHTTP(w, r)
+	})
 
 	// WebSocket MIDI bridge (compatible with OpenDeckUI WebConfig transport)
 	http.HandleFunc("/config", func(w http.ResponseWriter, r *http.Request) {
