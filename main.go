@@ -74,7 +74,7 @@ func main() {
 		} else {
 			conn.WriteMessage(websocket.BinaryMessage, raw)
 		}
-	})
+	}, midi.UseSysEx(), midi.SysExBufferSize(1024))
 	if err != nil {
 		log.Fatalf("Cannot listen to MIDI in: %v", err)
 	}
