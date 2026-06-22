@@ -5,7 +5,8 @@ Wants=sound.target
 
 [Service]
 Type=simple
-ExecStart=/udata/opendeck-bridge/opendeck-bridge -port OpenDeck -addr :8080
+ExecStart=/udata/opendeck-bridge/opendeck-bridge -port OpenDeck -addr :80
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 Restart=on-failure
 RestartSec=3
 
