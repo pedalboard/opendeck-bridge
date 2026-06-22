@@ -123,6 +123,8 @@ func main() {
 				activeConn = nil
 			}
 			clientMu.Unlock()
+			// Send SysEx close connection to firmware
+			send(midi.SysEx([]byte{0x00, 0x53, 0x43, 0x00, 0x00, 0x00}))
 			conn.Close()
 		}()
 
