@@ -2,6 +2,7 @@ package main
 
 import (
 	"embed"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -54,15 +55,18 @@ func main() {
 	// Global MIDI listener - fan out to active WebSocket client
 	var clientMu sync.Mutex
 	var activeConn *websocket.Conn
+	var clientReady bool
 
 	stop, err := midi.ListenTo(inPort, func(msg midi.Message, timestampms int32) {
 		clientMu.Lock()
 		conn := activeConn
+		ready := clientReady
 		clientMu.Unlock()
-		if conn == nil {
+		if conn == nil || !ready {
 			return
 		}
 		raw := msg.Bytes()
+		log.Printf("MIDI IN:  %s", hex.EncodeToString(raw))
 		// Ensure SysEx framing is present
 		if len(raw) > 0 && raw[0] != 0xF0 {
 			framed := make([]byte, len(raw)+2)
@@ -110,6 +114,7 @@ func main() {
 		// Set this connection as the active receiver
 		clientMu.Lock()
 		activeConn = conn
+		clientReady = false
 		clientMu.Unlock()
 
 		defer func() {
@@ -127,6 +132,10 @@ func main() {
 			if err != nil {
 				break
 			}
+			log.Printf("MIDI OUT: %s", hex.EncodeToString(data))
+			clientMu.Lock()
+			clientReady = true
+			clientMu.Unlock()
 			if len(data) >= 2 && data[0] == 0xF0 && data[len(data)-1] == 0xF7 {
 				inner := data[1 : len(data)-1]
 				send(midi.SysEx(inner))
