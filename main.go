@@ -54,8 +54,8 @@ func main() {
 	uiFS, _ := fs.Sub(uiFiles, "ui")
 	http.Handle("/", http.FileServer(http.FS(uiFS)))
 
-	// WebSocket MIDI bridge
-	http.HandleFunc("/midi", func(w http.ResponseWriter, r *http.Request) {
+	// WebSocket MIDI bridge (compatible with OpenDeckUI WebConfig transport)
+	http.HandleFunc("/config", func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			log.Printf("WebSocket upgrade error: %v", err)
