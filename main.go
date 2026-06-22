@@ -3,6 +3,7 @@ package main
 import (
 	"embed"
 	"flag"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
@@ -50,6 +51,35 @@ func main() {
 		log.Fatalf("Cannot open MIDI out: %v", err)
 	}
 
+	// Global MIDI listener - fan out to active WebSocket client
+	var clientMu sync.Mutex
+	var activeConn *websocket.Conn
+
+	stop, err := midi.ListenTo(inPort, func(msg midi.Message, timestampms int32) {
+		clientMu.Lock()
+		conn := activeConn
+		clientMu.Unlock()
+		if conn == nil {
+			return
+		}
+		raw := msg.Bytes()
+		log.Printf("MIDI→WS: %x", raw)
+		// Ensure SysEx framing is present
+		if len(raw) > 0 && raw[0] != 0xF0 {
+			framed := make([]byte, len(raw)+2)
+			framed[0] = 0xF0
+			copy(framed[1:], raw)
+			framed[len(framed)-1] = 0xF7
+			conn.WriteMessage(websocket.BinaryMessage, framed)
+		} else {
+			conn.WriteMessage(websocket.BinaryMessage, raw)
+		}
+	})
+	if err != nil {
+		log.Fatalf("Cannot listen to MIDI in: %v", err)
+	}
+	defer stop()
+
 	// Serve embedded UI with auto-connect injection
 	uiFS, _ := fs.Sub(uiFiles, "ui")
 	fileServer := http.FileServer(http.FS(uiFS))
@@ -60,61 +90,46 @@ func main() {
 				http.Error(w, "not found", 404)
 				return
 			}
-			// Pre-fill network address so user just clicks Connect
 			autoConnect := `<script>localStorage.setItem("opendeck-webconfig-address",location.host)</script>`
 			w.Header().Set("Content-Type", "text/html")
-			w.Write([]byte(autoConnect))
+			fmt.Fprint(w, autoConnect)
 			w.Write(indexData)
 			return
 		}
 		fileServer.ServeHTTP(w, r)
 	})
 
-	// WebSocket MIDI bridge (compatible with OpenDeckUI WebConfig transport)
+	// WebSocket MIDI bridge
 	http.HandleFunc("/config", func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			log.Printf("WebSocket upgrade error: %v", err)
 			return
 		}
-		defer conn.Close()
 		log.Printf("WebSocket client connected")
 
-		var mu sync.Mutex
+		// Set this connection as the active receiver
+		clientMu.Lock()
+		activeConn = conn
+		clientMu.Unlock()
 
-		// MIDI In → WebSocket
-		stop, err := midi.ListenTo(inPort, func(msg midi.Message, timestampms int32) {
-			mu.Lock()
-			defer mu.Unlock()
-			raw := msg.Bytes()
-			log.Printf("MIDI→WS: %x", raw)
-			// gomidi may or may not include F0/F7 framing - ensure it's present
-			if len(raw) > 0 && raw[0] != 0xF0 {
-				framed := make([]byte, len(raw)+2)
-				framed[0] = 0xF0
-				copy(framed[1:], raw)
-				framed[len(framed)-1] = 0xF7
-				conn.WriteMessage(websocket.BinaryMessage, framed)
-			} else {
-				conn.WriteMessage(websocket.BinaryMessage, raw)
+		defer func() {
+			clientMu.Lock()
+			if activeConn == conn {
+				activeConn = nil
 			}
-		})
-		if err != nil {
-			log.Printf("Cannot listen to MIDI in: %v", err)
-			return
-		}
-		defer stop()
+			clientMu.Unlock()
+			conn.Close()
+		}()
 
 		// WebSocket → MIDI Out
 		for {
 			_, data, err := conn.ReadMessage()
 			if err != nil {
-				log.Printf("WebSocket read error: %v", err)
+				log.Printf("WebSocket closed: %v", err)
 				break
 			}
 			log.Printf("WS→MIDI: %x", data)
-			// UI sends full SysEx with F0...F7 framing
-			// gomidi SysEx() expects inner bytes only (adds framing itself)
 			if len(data) >= 2 && data[0] == 0xF0 && data[len(data)-1] == 0xF7 {
 				inner := data[1 : len(data)-1]
 				send(midi.SysEx(inner))
