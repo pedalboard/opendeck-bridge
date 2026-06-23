@@ -41,26 +41,16 @@ func main() {
 		log.Fatal("Please specify -port flag")
 	}
 
-	outPort, err := midi.FindOutPort(*port)
-	if err != nil {
-		log.Fatalf("Cannot find MIDI out port %q: %v", *port, err)
-	}
-	inPort, err := midi.FindInPort(*port)
-	if err != nil {
-		log.Fatalf("Cannot find MIDI in port %q: %v", *port, err)
-	}
-
-	send, err := midi.SendTo(outPort)
-	if err != nil {
-		log.Fatalf("Cannot open MIDI out: %v", err)
-	}
-
 	// Global MIDI listener - fan out to active WebSocket client
 	var clientMu sync.Mutex
 	var activeConn *websocket.Conn
 	var clientReady bool
 
-	stop, err := midi.ListenTo(inPort, func(msg midi.Message, timestampms int32) {
+	var midiMu sync.Mutex
+	var send func(midi.Message) error
+	var stopListener func()
+
+	midiListener := func(msg midi.Message, timestampms int32) {
 		clientMu.Lock()
 		conn := activeConn
 		ready := clientReady
@@ -70,7 +60,6 @@ func main() {
 		}
 		raw := msg.Bytes()
 		log.Printf("MIDI IN:  %s", hex.EncodeToString(raw))
-		// Ensure SysEx framing is present
 		if len(raw) > 0 && raw[0] != 0xF0 {
 			framed := make([]byte, len(raw)+2)
 			framed[0] = 0xF0
@@ -80,11 +69,56 @@ func main() {
 		} else {
 			conn.WriteMessage(websocket.BinaryMessage, raw)
 		}
-	}, midi.UseSysEx(), midi.SysExBufferSize(1024))
-	if err != nil {
-		log.Fatalf("Cannot listen to MIDI in: %v", err)
 	}
-	defer stop()
+
+	connectMidi := func() error {
+		midiMu.Lock()
+		defer midiMu.Unlock()
+		if stopListener != nil {
+			stopListener()
+			stopListener = nil
+		}
+		outPort, err := midi.FindOutPort(*port)
+		if err != nil {
+			return fmt.Errorf("find out port: %w", err)
+		}
+		inPort, err := midi.FindInPort(*port)
+		if err != nil {
+			return fmt.Errorf("find in port: %w", err)
+		}
+		s, err := midi.SendTo(outPort)
+		if err != nil {
+			return fmt.Errorf("open out: %w", err)
+		}
+		send = s
+		stop, err := midi.ListenTo(inPort, midiListener, midi.UseSysEx(), midi.SysExBufferSize(1024))
+		if err != nil {
+			return fmt.Errorf("listen: %w", err)
+		}
+		stopListener = stop
+		log.Printf("MIDI connected: %s", outPort.String())
+		return nil
+	}
+
+	if err := connectMidi(); err != nil {
+		log.Fatalf("Cannot connect MIDI: %v", err)
+	}
+	defer func() {
+		midiMu.Lock()
+		if stopListener != nil {
+			stopListener()
+		}
+		midiMu.Unlock()
+	}()
+
+	midiSend := func(msg midi.Message) {
+		midiMu.Lock()
+		s := send
+		midiMu.Unlock()
+		if s != nil {
+			s(msg)
+		}
+	}
 
 	// Serve embedded UI with auto-connect injection
 	uiFS, _ := fs.Sub(uiFiles, "ui")
@@ -129,8 +163,7 @@ if(!location.hash.includes("/device/")){location.hash="#/device/__webconfig__"+e
 				activeConn = nil
 			}
 			clientMu.Unlock()
-			// Send SysEx close connection to firmware
-			send(midi.SysEx([]byte{0x00, 0x53, 0x43, 0x00, 0x00, 0x00}))
+			midiSend(midi.SysEx([]byte{0x00, 0x53, 0x43, 0x00, 0x00, 0x00}))
 			conn.Close()
 		}()
 
@@ -146,9 +179,9 @@ if(!location.hash.includes("/device/")){location.hash="#/device/__webconfig__"+e
 			clientMu.Unlock()
 			if len(data) >= 2 && data[0] == 0xF0 && data[len(data)-1] == 0xF7 {
 				inner := data[1 : len(data)-1]
-				send(midi.SysEx(inner))
+				midiSend(midi.SysEx(inner))
 			} else {
-				send(data)
+				midiSend(data)
 			}
 		}
 	})
@@ -209,9 +242,9 @@ if(!location.hash.includes("/device/")){location.hash="#/device/__webconfig__"+e
 
 				if !alreadyMounted {
 					// Send bootloader SysEx: handshake then bootloader command
-					send(midi.SysEx([]byte{0x00, 0x53, 0x43, 0x00, 0x00, 0x01}))
+					midiSend(midi.SysEx([]byte{0x00, 0x53, 0x43, 0x00, 0x00, 0x01}))
 					<-time.After(500 * time.Millisecond)
-					send(midi.SysEx([]byte{0x00, 0x53, 0x43, 0x00, 0x00, 0x55}))
+					midiSend(midi.SysEx([]byte{0x00, 0x53, 0x43, 0x00, 0x00, 0x55}))
 
 					// Wait for UF2 mount
 					for i := 0; i < 30; i++ {
@@ -257,6 +290,17 @@ if(!location.hash.includes("/device/")){location.hash="#/device/__webconfig__"+e
 				}
 				log.Printf("DFU: Flash complete")
 				sendAck(cmdFinish, statusOk, bytesReceived)
+				// Reconnect MIDI after device reboots
+				go func() {
+					<-time.After(5 * time.Second)
+					for i := 0; i < 10; i++ {
+						if err := connectMidi(); err == nil {
+							return
+						}
+						<-time.After(1 * time.Second)
+					}
+					log.Printf("DFU: WARNING - failed to reconnect MIDI after flash")
+				}()
 				return
 
 			case cmdAbort:
@@ -268,6 +312,6 @@ if(!location.hash.includes("/device/")){location.hash="#/device/__webconfig__"+e
 		}
 	})
 
-	log.Printf("opendeck-bridge listening on %s (MIDI: %s)", *addr, outPort.String())
+	log.Printf("opendeck-bridge listening on %s (MIDI: %s)", *addr, *port)
 	log.Fatal(http.ListenAndServe(*addr, nil))
 }
