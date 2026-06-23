@@ -8,7 +8,9 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"os"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"gitlab.com/gomidi/midi/v2"
@@ -25,6 +27,7 @@ var upgrader = websocket.Upgrader{
 func main() {
 	addr := flag.String("addr", ":8080", "listen address")
 	port := flag.String("port", "", "MIDI port name (substring match)")
+	uf2Mount := flag.String("uf2-mount", "/media/laenzi/RPI-RP2", "UF2 mount point for RP2040 bootloader")
 	flag.Parse()
 
 	if *port == "" {
@@ -146,6 +149,121 @@ if(!location.hash.includes("/device/")){location.hash="#/device/__webconfig__"+e
 				send(midi.SysEx(inner))
 			} else {
 				send(data)
+			}
+		}
+	})
+
+	// WebSocket DFU handler - implements OpenDeck Network DFU protocol
+	http.HandleFunc("/dfu", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			log.Printf("DFU WebSocket upgrade error: %v", err)
+			return
+		}
+		defer conn.Close()
+		log.Printf("DFU client connected")
+
+		const (
+			cmdBegin  = 0x01
+			cmdChunk  = 0x02
+			cmdFinish = 0x03
+			cmdAbort  = 0x04
+			ack       = 0x81
+			statusOk  = 0x00
+			statusErr = 0x01
+		)
+
+		sendAck := func(cmd byte, status byte, bytesWritten uint32) {
+			resp := []byte{
+				ack, cmd, status,
+				byte(bytesWritten), byte(bytesWritten >> 8),
+				byte(bytesWritten >> 16), byte(bytesWritten >> 24),
+			}
+			conn.WriteMessage(websocket.BinaryMessage, resp)
+		}
+
+		var firmware []byte
+		var bytesReceived uint32
+
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				log.Printf("DFU connection closed: %v", err)
+				return
+			}
+			if len(data) == 0 {
+				continue
+			}
+
+			switch data[0] {
+			case cmdBegin:
+				log.Printf("DFU: BEGIN - entering bootloader")
+				firmware = nil
+				bytesReceived = 0
+
+				// Check if already in bootloader mode (mount exists)
+				alreadyMounted := false
+				if _, err := os.Stat(*uf2Mount + "/INFO_UF2.TXT"); err == nil {
+					alreadyMounted = true
+				}
+
+				if !alreadyMounted {
+					// Send bootloader SysEx: handshake then bootloader command
+					send(midi.SysEx([]byte{0x00, 0x53, 0x43, 0x00, 0x00, 0x01}))
+					<-time.After(500 * time.Millisecond)
+					send(midi.SysEx([]byte{0x00, 0x53, 0x43, 0x00, 0x00, 0x55}))
+
+					// Wait for UF2 mount
+					for i := 0; i < 30; i++ {
+						if _, err := os.Stat(*uf2Mount + "/INFO_UF2.TXT"); err == nil {
+							alreadyMounted = true
+							break
+						}
+						<-time.After(1 * time.Second)
+					}
+				}
+
+				if !alreadyMounted {
+					log.Printf("DFU: ERROR - UF2 mount not found at %s", *uf2Mount)
+					sendAck(cmdBegin, statusErr, 0)
+					return
+				}
+				log.Printf("DFU: UF2 mounted at %s", *uf2Mount)
+				sendAck(cmdBegin, statusOk, 0)
+
+			case cmdChunk:
+				if len(data) < 4 {
+					sendAck(cmdChunk, statusErr, bytesReceived)
+					return
+				}
+				chunkLen := int(data[1]) | int(data[2])<<8
+				payload := data[3:]
+				if len(payload) < chunkLen {
+					payload = payload[:len(payload)]
+				} else {
+					payload = payload[:chunkLen]
+				}
+				firmware = append(firmware, payload...)
+				bytesReceived += uint32(len(payload))
+				sendAck(cmdChunk, statusOk, bytesReceived)
+
+			case cmdFinish:
+				log.Printf("DFU: FINISH - writing %d bytes to %s", len(firmware), *uf2Mount)
+				uf2Path := *uf2Mount + "/firmware.uf2"
+				if err := os.WriteFile(uf2Path, firmware, 0644); err != nil {
+					log.Printf("DFU: ERROR writing UF2: %v", err)
+					sendAck(cmdFinish, statusErr, bytesReceived)
+					return
+				}
+				log.Printf("DFU: Flash complete")
+				sendAck(cmdFinish, statusOk, bytesReceived)
+				return
+
+			case cmdAbort:
+				log.Printf("DFU: ABORT")
+				firmware = nil
+				sendAck(cmdAbort, statusOk, 0)
+				return
 			}
 		}
 	})
