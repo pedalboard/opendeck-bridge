@@ -2,8 +2,8 @@ BINARY = pedalboard-bridge
 REMOTE = laenzi@cm5-dev.home
 REMOTE_DIR = ~/projects/pedalboard-bridge
 DEPLOY_DIR = /udata/pedalboard-bridge
-VERSION = $(shell git rev-parse --short HEAD)
-LDFLAGS = -ldflags "-X main.version=$(VERSION)"
+GIT_HASH = $(shell git rev-parse --short HEAD)
+LDFLAGS = -ldflags "-X main.version=0.1.0-$(GIT_HASH)"
 
 .PHONY: build deploy restart clean
 

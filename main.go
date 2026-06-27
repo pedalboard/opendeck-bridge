@@ -114,7 +114,13 @@ func (m *MidiPort) IsOpen() bool {
 func main() {
 	addr := flag.String("addr", ":8080", "listen address")
 	port := flag.String("port", "", "MIDI port name (substring match in /proc/asound/cards)")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(version)
+		os.Exit(0)
+	}
 
 	if *port == "" {
 		log.Fatal("Please specify -port flag")
