@@ -1,30 +1,22 @@
-BINARY = opendeck-bridge
+BINARY = pedalboard-bridge
 REMOTE = laenzi@cm5-dev.home
-REMOTE_DIR = /home/laenzi/projects/opendeck-bridge
-UI_DIR = OpenDeckUI
+REMOTE_DIR = ~/projects/pedalboard-bridge
+DEPLOY_DIR = /udata/pedalboard-bridge
+VERSION = $(shell git rev-parse --short HEAD)
+LDFLAGS = -ldflags "-X main.version=$(VERSION)"
 
-.PHONY: build build-arm64 clean ui deploy restart
+.PHONY: build deploy restart clean
 
 build:
-	go build -o $(BINARY) .
+	go build $(LDFLAGS) -o $(BINARY) .
 
-build-arm64:
-	CGO_ENABLED=1 CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ GOOS=linux GOARCH=arm64 go build -o $(BINARY)-arm64 .
-
-ui:
-	cd $(UI_DIR) && yarn && yarn build
-	rm -rf ui
-	cp -a $(UI_DIR)/dist ui
-
-deploy: ui
-	rsync -a --delete --exclude .git --exclude OpenDeckUI . $(REMOTE):$(REMOTE_DIR)/
-	ssh $(REMOTE) "export PATH=\$$PATH:/usr/local/go/bin && cd $(REMOTE_DIR) && go build -o $(BINARY) . && pkill $(BINARY) || true"
-	sleep 2
-	ssh $(REMOTE) "cd $(REMOTE_DIR) && nohup ./$(BINARY) -port 'OpenDeck' -addr :8080 > /tmp/bridge.log 2>&1 &"
-	@echo "Deployed. Logs: ssh $(REMOTE) tail -f /tmp/bridge.log"
+deploy:
+	git push
+	ssh $(REMOTE) "cd $(REMOTE_DIR) && git pull && /usr/local/go/bin/go build $(LDFLAGS) -o $(BINARY) ."
+	ssh $(REMOTE) "sudo systemctl stop $(BINARY) && sudo cp $(REMOTE_DIR)/$(BINARY) $(DEPLOY_DIR)/ && sudo systemctl start $(BINARY)"
 
 restart:
-	ssh $(REMOTE) "pkill $(BINARY) || true; sleep 1; cd $(REMOTE_DIR) && nohup ./$(BINARY) -port 'OpenDeck' -addr :8080 > /tmp/bridge.log 2>&1 &"
+	ssh $(REMOTE) "sudo systemctl restart $(BINARY)"
 
 clean:
-	rm -f $(BINARY) $(BINARY)-arm64
+	rm -f $(BINARY)

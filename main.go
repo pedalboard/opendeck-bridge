@@ -25,6 +25,8 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
+var version = "dev"
+
 func findMidiDevice(portName string) (string, error) {
 	data, err := os.ReadFile("/proc/asound/cards")
 	if err != nil {
@@ -293,6 +295,6 @@ if(!location.hash.includes("/device/")){location.hash="#/device/__webconfig__"+e
 		}
 	})
 
-	log.Printf("pedalboard-bridge listening on %s (MIDI: %s)", *addr, *port)
+	log.Printf("pedalboard-bridge %s listening on %s (MIDI: %s)", version, *addr, *port)
 	log.Fatal(http.ListenAndServe(*addr, nil))
 }
