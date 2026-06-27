@@ -129,6 +129,7 @@ func main() {
 	var midi MidiPort
 	var clientMu sync.Mutex
 	var activeConn *websocket.Conn
+	var monitorConn *websocket.Conn
 	var clientReady bool
 
 	// Connect to MIDI device
@@ -186,6 +187,13 @@ func main() {
 					} else if sysex != nil {
 						sysex = append(sysex, b)
 					}
+				}
+				// Forward raw bytes to monitor
+				clientMu.Lock()
+				mon := monitorConn
+				clientMu.Unlock()
+				if mon != nil {
+					mon.WriteMessage(websocket.BinaryMessage, buf[:n])
 				}
 			}
 		}()
@@ -298,6 +306,32 @@ if(!location.hash.includes("/device/")){location.hash="#/device/__webconfig__"+e
 			}
 			log.Printf("RAW OUT: %s", hex.EncodeToString(data))
 			midiSend(data)
+		}
+	})
+
+	// WebSocket /monitor endpoint (streams all raw MIDI IN)
+	http.HandleFunc("/monitor", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		log.Printf("Monitor client connected")
+		clientMu.Lock()
+		monitorConn = conn
+		clientMu.Unlock()
+		defer func() {
+			clientMu.Lock()
+			if monitorConn == conn {
+				monitorConn = nil
+			}
+			clientMu.Unlock()
+			conn.Close()
+		}()
+		// Keep connection alive until client disconnects
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				break
+			}
 		}
 	})
 
