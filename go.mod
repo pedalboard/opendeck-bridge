@@ -1,8 +1,5 @@
-module github.com/pedalboard/opendeck-bridge
+module github.com/pedalboard/pedalboard-bridge
 
 go 1.26.4
 
-require (
-	github.com/gorilla/websocket v1.5.3
-	gitlab.com/gomidi/midi/v2 v2.3.24
-)
+require github.com/gorilla/websocket v1.5.3
