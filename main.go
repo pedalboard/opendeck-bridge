@@ -141,8 +141,12 @@ func main() {
 		return midi.Open(device)
 	}
 
-	if err := connect(); err != nil {
-		log.Fatalf("Cannot connect MIDI: %v", err)
+	for {
+		if err := connect(); err == nil {
+			break
+		}
+		log.Printf("Cannot connect MIDI: waiting for device...")
+		time.Sleep(2 * time.Second)
 	}
 
 	// MIDI reader goroutine
