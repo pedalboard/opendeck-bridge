@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
-	"io"
 	"io/fs"
 	"log"
 	"net/http"
@@ -13,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -53,6 +53,7 @@ func findMidiDevice(portName string) (string, error) {
 type MidiPort struct {
 	mu     sync.Mutex
 	in     *os.File
+	inFd   int
 	out    *os.File
 	device string
 }
@@ -65,13 +66,16 @@ func (m *MidiPort) Open(device string) error {
 	if err != nil {
 		return fmt.Errorf("open out: %w", err)
 	}
-	in, err := os.OpenFile(device, os.O_RDONLY, 0)
+	// Use syscall.Open for input to keep the fd in blocking mode.
+	// Go's os.OpenFile sets fds to non-blocking which breaks ALSA rawmidi reads.
+	inFd, err := syscall.Open(device, syscall.O_RDONLY, 0)
 	if err != nil {
 		out.Close()
 		return fmt.Errorf("open in: %w", err)
 	}
 	m.out = out
-	m.in = in
+	m.inFd = inFd
+	m.in = os.NewFile(uintptr(inFd), device+"-in")
 	m.device = device
 	log.Printf("MIDI connected: %s", device)
 	return nil
@@ -82,8 +86,9 @@ func (m *MidiPort) Close_locked() {
 		m.out.Close()
 		m.out = nil
 	}
-	if m.in != nil {
-		m.in.Close()
+	if m.inFd > 0 {
+		syscall.Close(m.inFd)
+		m.inFd = 0
 		m.in = nil
 	}
 }
@@ -151,29 +156,40 @@ func main() {
 
 	// MIDI reader goroutine
 	startReader := func() {
+		// Blocking read runs in its own goroutine (parks an OS thread).
+		// Data is sent via channel to the processing goroutine which
+		// handles SysEx parsing and monitor forwarding.
+		dataCh := make(chan []byte, 64)
+
 		go func() {
 			buf := make([]byte, 1024)
-			var sysex []byte
 			for {
 				midi.mu.Lock()
-				in := midi.in
+				fd := midi.inFd
 				midi.mu.Unlock()
-				if in == nil {
+				if fd == 0 {
 					time.Sleep(100 * time.Millisecond)
 					continue
 				}
-				n, err := in.Read(buf)
+				n, err := syscall.Read(fd, buf)
 				if err != nil {
-					if err != io.EOF {
-						log.Printf("MIDI read error: %v", err)
-					}
-					// Device gone — trigger reconnect
+					log.Printf("MIDI read error: %v", err)
 					midi.Close()
 					time.Sleep(100 * time.Millisecond)
 					continue
 				}
-				for i := 0; i < n; i++ {
-					b := buf[i]
+				if n > 0 {
+					data := make([]byte, n)
+					copy(data, buf[:n])
+					dataCh <- data
+				}
+			}
+		}()
+
+		go func() {
+			var sysex []byte
+			for data := range dataCh {
+				for _, b := range data {
 					if b == 0xF0 {
 						sysex = []byte{b}
 					} else if b == 0xF7 && sysex != nil {
@@ -197,7 +213,9 @@ func main() {
 				mon := monitorConn
 				clientMu.Unlock()
 				if mon != nil {
-					mon.WriteMessage(websocket.BinaryMessage, buf[:n])
+					if err := mon.WriteMessage(websocket.BinaryMessage, data); err != nil {
+						log.Printf("Monitor write error: %v", err)
+					}
 				}
 			}
 		}()
